@@ -612,6 +612,121 @@ post /api/reset '{}' >/dev/null
 post /api/capacity '{"globalLimit":null,"domainLimits":{}}' >/dev/null
 
 echo
+echo "------- 屏蔽第三方 Cookie（blockThirdParty）写入演算 -------"
+
+echo "== T1. 开启后缺少顶层页面 URL -> 拒绝（即使普通 cookie） =="
+R=$(post /api/store '{"url":"https://a.example/","setCookie":"t1=1; Path=/","blockThirdParty":true}')
+check "拒绝" '"action":"rejected"' "$R"
+check "原因（必须提供顶层页面 URL）" "必须提供有效的顶层页面 URL" "$R"
+
+echo "== T2. 开启后顶层页面 URL 非法 -> 拒绝 =="
+R=$(post /api/store '{"url":"https://a.example/","setCookie":"t1=1; Path=/","topUrl":"not-a-url","blockThirdParty":true}')
+check "拒绝" '"action":"rejected"' "$R"
+check "原因（URL 非法）" "非法或非 http" "$R"
+
+echo "== T3. 跨站响应的普通 Cookie 拒绝写入，罐不变、不触发容量淘汰 =="
+post /api/capacity '{"globalLimit":1}' >/dev/null
+post /api/store '{"url":"https://keep.example/","setCookie":"keep=1; Path=/"}' >/dev/null
+R=$(post /api/store '{"url":"https://tracker.vendor.com/","setCookie":"trk=1; Path=/","topUrl":"https://shop.example.com/","blockThirdParty":true}')
+check "拒绝" '"action":"rejected"' "$R"
+check "原因（跨站拒绝写入普通 Cookie）" "拒绝写入普通 Cookie" "$R"
+check "给出站点对比" "响应站 https://vendor.com ≠ 顶层站 https://example.com" "$R"
+check "提示不触发容量淘汰" "不触发容量淘汰" "$R"
+J=$(curl -s "$BASE/api/jar")
+check "罐中仅剩 keep（全局上限 1 未触发淘汰）" '"totalCount":1' "$J"
+check "keep 未被淘汰" "keep" "$J"
+
+echo "== T4. 跨站响应的普通 Cookie 删除（Max-Age=0）也被拒绝 =="
+R=$(post /api/store '{"url":"https://keep.example.evil.net/","setCookie":"keep=; Path=/; Max-Age=0","topUrl":"https://shop.example.com/","blockThirdParty":true}')
+check "拒绝" '"action":"rejected"' "$R"
+check "原因（跨站拒绝删除普通 Cookie）" "拒绝删除普通 Cookie" "$R"
+J=$(curl -s "$BASE/api/jar")
+check "keep 仍在罐中（删除被拒绝）" "keep" "$J"
+post /api/capacity '{"globalLimit":null,"domainLimits":{}}' >/dev/null
+
+echo "== T5. 同站响应开启屏蔽也正常入罐 =="
+R=$(post /api/store '{"url":"https://api.shop.example.com/","setCookie":"same=1; Path=/","topUrl":"https://shop.example.com/","blockThirdParty":true}')
+check "入罐" '"action":"stored"' "$R"
+
+echo "== T6. 跨站响应的 Partitioned 分区项不受屏蔽影响（仍按 Secure+分区键规则入罐） =="
+R=$(post /api/store '{"url":"https://widget.vendor.com/frame","setCookie":"ch=1; Path=/; Secure; SameSite=None; Partitioned","topUrl":"https://shop.example.com/","blockThirdParty":true}')
+check "分区项跨站入罐" '"action":"stored"' "$R"
+check "分区键正确（shop.example.com 的可注册域）" '"partitionKey":"https://example.com"' "$R"
+R=$(post /api/store '{"url":"https://widget.vendor.com/frame","setCookie":"ch2=1; Path=/; Partitioned","topUrl":"https://shop.example.com/","blockThirdParty":true}')
+check "Partitioned 未带 Secure 仍按既有规则拒绝" '"action":"rejected"' "$R"
+check "拒绝原因（必须带 Secure）" "必须同时声明 Secure" "$R"
+
+echo "== T7. 关闭开关（默认）跨站普通 Cookie 照常入罐 =="
+R=$(post /api/store '{"url":"https://tracker.vendor.com/","setCookie":"trk=2; Path=/","topUrl":"https://shop.example.com/"}')
+check "默认不屏蔽，入罐" '"action":"stored"' "$R"
+
+post /api/reset '{}' >/dev/null
+post /api/capacity '{"globalLimit":null,"domainLimits":{}}' >/dev/null
+
+echo
+echo "------- 屏蔽第三方 Cookie（blockThirdParty）发送演算 -------"
+
+post /api/store '{"url":"https://widget.vendor.com/","setCookie":"plain=1; Path=/; Secure; SameSite=None"}' >/dev/null
+post /api/store '{"url":"https://widget.vendor.com/","setCookie":"ch=p; Path=/; Secure; SameSite=None; Partitioned","topUrl":"https://site-a.example/"}' >/dev/null
+
+echo "== U1. 开启后缺少顶层页面 URL -> 报错 =="
+R=$(post /api/send '{"url":"https://widget.vendor.com/","blockThirdParty":true}')
+check "报错" '"ok":false' "$R"
+check "原因（必须提供顶层页面 URL）" "必须提供有效的顶层页面 URL" "$R"
+check "回显开关状态" '"blockThirdParty":true' "$R"
+
+echo "== U2. 跨站请求：普通项排除，分区键匹配的 Partitioned 仍发送 =="
+R=$(post /api/send '{"url":"https://widget.vendor.com/","topUrl":"https://site-a.example/","blockThirdParty":true}')
+HDR=$(echo "$R" | python3 -c "import sys,json;print(json.load(sys.stdin)['cookieHeader'])")
+check "回显开关状态" '"blockThirdParty":true' "$R"
+check "跨站标记" '"sameSiteContext":false' "$R"
+check "分区项发送" "ch=p" "$HDR"
+check "普通项排除原因（屏蔽第三方）" "屏蔽第三方 Cookie：跨站请求" "$R"
+check "豁免说明（分区键匹配的 Partitioned 项）" "豁免" "$R"
+if [[ "$HDR" != *"plain=1"* ]]; then echo "✅ 普通项被第三方屏蔽排除"; PASS=$((PASS+1));
+else echo "❌ 普通项跨站被误发（$HDR）"; FAIL=$((FAIL+1)); fi
+
+echo "== U3. 同站请求开启屏蔽：普通项照常发送 =="
+R=$(post /api/send '{"url":"https://widget.vendor.com/","topUrl":"https://widget.vendor.com/","blockThirdParty":true}')
+HDR=$(echo "$R" | python3 -c "import sys,json;print(json.load(sys.stdin)['cookieHeader'])")
+check "同站标记" '"sameSiteContext":true' "$R"
+check "普通项发送" "plain=1" "$HDR"
+
+echo "== U4. 关闭开关（默认）跨站普通项照常发送（SameSite=None） =="
+R=$(post /api/send '{"url":"https://widget.vendor.com/","topUrl":"https://site-a.example/"}')
+HDR=$(echo "$R" | python3 -c "import sys,json;print(json.load(sys.stdin)['cookieHeader'])")
+check "回显开关关闭" '"blockThirdParty":false' "$R"
+check "普通项发送" "plain=1" "$HDR"
+
+echo "== U5. 被屏蔽排除的条目不刷新最近访问时间 =="
+post /api/reset '{}' >/dev/null
+post /api/capacity '{"domainLimits":{"lra3p.test":2}}' >/dev/null
+post /api/store '{"url":"https://lra3p.test/","setCookie":"a=1; Path=/a; Priority=Medium"}' >/dev/null
+sleep 1.2
+post /api/store '{"url":"https://lra3p.test/","setCookie":"b=2; Path=/b; Priority=Medium"}' >/dev/null
+sleep 1.2
+# 同站请求 /b/x：仅 b 命中路径并发送，b 的最近访问时间被刷新；a 不动
+post /api/send '{"url":"https://lra3p.test/b/x"}' >/dev/null
+sleep 1.2
+# 跨站 + 屏蔽请求 /a/x：a 命中路径但被第三方屏蔽排除，最近访问时间不得刷新
+R=$(post /api/send '{"url":"https://lra3p.test/a/x","topUrl":"https://other.example/","blockThirdParty":true}')
+check "a 被屏蔽排除" "屏蔽第三方 Cookie：跨站请求" "$R"
+sleep 1.2
+# 写入 c 触发域级淘汰：a 的访问时间最老（屏蔽排除未刷新），应淘汰 a；
+# 若屏蔽排除错误地刷新了 a，则最老是 b，断言会失败
+R=$(post /api/store '{"url":"https://lra3p.test/","setCookie":"c=3; Path=/c; Priority=Medium"}')
+check "淘汰最久未访问的 a（证明屏蔽排除未刷新访问时间）" '"cookie":"a=1"' "$R"
+
+post /api/reset '{}' >/dev/null
+post /api/capacity '{"globalLimit":null,"domainLimits":{}}' >/dev/null
+
+echo "== U6. blockThirdParty 参数类型校验 =="
+R=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/store" -H 'Content-Type: application/json' -d '{"url":"https://a.example/","setCookie":"x=1","blockThirdParty":"yes"}')
+[ "$R" = "400" ] && { echo "✅ /api/store 非布尔 blockThirdParty 拒绝（400）"; PASS=$((PASS+1)); } || { echo "❌ /api/store 应 400，实际 $R"; FAIL=$((FAIL+1)); }
+R=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/send" -H 'Content-Type: application/json' -d '{"url":"https://a.example/","blockThirdParty":1}')
+[ "$R" = "400" ] && { echo "✅ /api/send 非布尔 blockThirdParty 拒绝（400）"; PASS=$((PASS+1)); } || { echo "❌ /api/send 应 400，实际 $R"; FAIL=$((FAIL+1)); }
+
+echo
 echo "================================"
 echo "通过 $PASS，失败 $FAIL"
 [ "$FAIL" -eq 0 ]

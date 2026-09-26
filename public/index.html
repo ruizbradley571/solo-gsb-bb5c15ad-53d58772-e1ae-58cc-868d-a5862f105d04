@@ -34,9 +34,14 @@
         </label>
 
         <label class="field">
-          <span class="field-label">顶层页面 URL（仅 <code>Partitioned</code>（CHIPS）cookie 必需：须同时带 <code>Secure</code>，分区键 = 该 URL 的 scheme + 可注册域；普通 cookie 留空即可）</span>
+          <span class="field-label">顶层页面 URL（仅 <code>Partitioned</code>（CHIPS）cookie 必需：须同时带 <code>Secure</code>，分区键 = 该 URL 的 scheme + 可注册域；普通 cookie 留空即可——除非开启下方「屏蔽第三方 Cookie」）</span>
           <input id="store-top-url" type="text" spellcheck="false" autocomplete="off"
             placeholder="例如：https://embed.example.net/（Partitioned cookie 嵌入第三方页面时的顶层页）" />
+        </label>
+
+        <label class="field-nav" title="对应 /api/store 的 blockThirdParty 参数">
+          <input id="store-block-3p" type="checkbox" />
+          <span>屏蔽第三方 Cookie（须填有效顶层页面 URL：<strong>跨站响应拒绝写入/删除普通 Cookie</strong>，不改动罐也不触发容量淘汰；Partitioned 分区项仍按 Secure 与分区键规则正常入罐）</span>
         </label>
 
         <div class="row">
@@ -80,6 +85,11 @@
             <span>顶层导航（地址栏 / 链接跳转；子资源、iframe、fetch 请取消勾选）</span>
           </label>
         </div>
+
+        <label class="field-nav" title="对应 /api/send 的 blockThirdParty 参数">
+          <input id="send-block-3p" type="checkbox" />
+          <span>屏蔽第三方 Cookie（须填有效顶层页面 URL：<strong>跨站请求排除普通 Cookie</strong>，被排除条目不刷新最近访问时间；分区键匹配的 Partitioned 项仍可发送）</span>
+        </label>
 
         <div class="row">
           <button id="send-btn" class="btn primary">生成 Cookie 头</button>
@@ -147,6 +157,7 @@
         <li><strong>最近访问（LRA）：</strong>创建 / 覆盖更新时写入访问时间；条目<strong>发送成功</strong>即刷新。同级 Priority 中越久未访问越先被淘汰。</li>
         <li><strong>站点（site）：</strong>scheme + 可注册域（eTLD+1，由公共后缀列表 PSL 判定，如 <code>https://example.com</code>）；IP 与 localhost 按完整主机比较。请求站 = 顶层站即「同站」。</li>
         <li><strong>发送限制：</strong><code>Strict</code> 仅同站发送；显式 <code>Lax</code> 仅同站或跨站顶层导航的安全方法（GET/HEAD/OPTIONS/TRACE）发送；<strong>默认 Lax</strong> 额外允许创建不超过 <strong>120 秒</strong>的跨站顶层 POST；<code>None</code> 跨站照常发送（已强制 Secure）。</li>
+        <li><strong>屏蔽第三方 Cookie（可选，默认关闭）：</strong>界面开关与 <code>/api/store</code>、<code>/api/send</code> 的 <code>blockThirdParty</code> 参数一一对应。开启后<strong>必须提供有效顶层页面 URL</strong>，按 scheme + 可注册域判定它与响应/请求 URL 是否跨站：<strong>跨站响应拒绝写入和删除普通 Cookie</strong>（不改动罐、不触发容量淘汰），Partitioned 分区项仍按既有 Secure 与分区键规则处理；<strong>跨站请求排除普通 Cookie</strong>（被排除条目不刷新最近访问时间），分区键匹配的 Partitioned 项仍可发送。拒绝/排除结果逐项说明策略原因。</li>
         <li><strong>排序：</strong>发送时按 Path 长度降序，Path 等长时按首次创建顺序升序，再以 <code>; </code> 拼接成 Cookie 头。</li>
       </ul>
     </details>

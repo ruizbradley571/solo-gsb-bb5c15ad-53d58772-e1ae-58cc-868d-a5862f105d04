@@ -18,6 +18,10 @@
  *     分区键 = 顶层 URL 的 scheme + 可注册域（IP、localhost 用完整主机）。
  *     分区键是存储身份的一部分：普通项与不同分区的同名同域同路径项并存，
  *     覆盖更新与 Max-Age 删除都只影响对应分区。
+ *   - 屏蔽第三方 Cookie（可选模式，默认关闭）：开启时必须提供有效顶层页面 URL，
+ *     按 scheme + 可注册域判定响应站与顶层站是否跨站；跨站响应拒绝写入和删除
+ *     普通 Cookie（不改动罐、不触发容量淘汰），Partitioned 分区项不受此限，
+ *     仍按既有 Secure 与分区键规则处理。
  *
  *  容量压力模拟（入罐沿用上述全部校验通过后执行）：
  *   - 容量按「条目条数」计，可分别为每个可注册域（eTLD+1；IP/localhost 按完整主机）
@@ -41,6 +45,9 @@
  *       · 显式 Lax：同站，或跨站顶层导航的安全方法（GET/HEAD/OPTIONS/TRACE）；
  *       · 默认 Lax（未声明或非法值）：同上，另允许创建不超过 120 秒的跨站顶层 POST；
  *       · None：跨站照常发送（入罐时已强制要求 Secure）；
+ *   - 屏蔽第三方 Cookie（可选模式，默认关闭）：开启时必须提供有效顶层页面 URL；
+ *     跨站请求排除普通 Cookie（被排除条目不刷新最近访问时间），
+ *     分区键匹配的 Partitioned 项不受此限，仍可发送；
  *   - 排序：Path 长度降序；相同长度按首次创建顺序（creation index）升序。
  */
 import { getDomain } from 'tldts';
@@ -255,6 +262,17 @@ export interface RequestItem {
   expired: boolean;
 }
 
+/** 写入演算的附加选项 */
+export interface StoreOptions {
+  /**
+   * 屏蔽第三方 Cookie（默认 false）：开启时必须提供有效顶层页面 URL（topUrl），
+   * 跨站响应拒绝写入/删除普通 Cookie（Partitioned 分区项不受此限）
+   */
+  blockThirdParty?: boolean;
+  /** 注入当前时间戳（测试用），缺省 Date.now() */
+  now?: number;
+}
+
 /** 发送演算的附加上下文（SameSite 判定所需） */
 export interface SendOptions {
   /** 顶层页面 URL（决定 same-site 上下文）；缺省视为与请求 URL 相同，即同站 */
@@ -263,6 +281,11 @@ export interface SendOptions {
   method?: string;
   /** 是否顶层导航，缺省 true */
   topLevelNav?: boolean;
+  /**
+   * 屏蔽第三方 Cookie（默认 false）：开启时必须提供有效顶层页面 URL，
+   * 跨站请求排除普通 Cookie（分区键匹配的 Partitioned 项不受此限）
+   */
+  blockThirdParty?: boolean;
 }
 
 export interface SendResult {
@@ -282,6 +305,8 @@ export interface SendResult {
   topSite: string;
   /** 请求站与顶层站是否同站 */
   sameSiteContext: boolean;
+  /** 本次演算是否开启了「屏蔽第三方 Cookie」模式 */
+  blockThirdParty: boolean;
   /**
    * 请求分区键（由顶层页面 URL 计算，与顶层站 topSite 相同）：
    * 仅分区键相同的 Partitioned 项可发送。
@@ -581,9 +606,13 @@ export class CookieJar {
   /**
    * 按顺序处理一次「响应 URL + 单条 Set-Cookie」写入。
    * topUrl 为顶层页面 URL：仅在 Set-Cookie 带 Partitioned 时使用（计算分区键）；
-   * 普通 cookie 忽略它。返回动作（入罐 / 更新 / 删除 / 拒绝）及原因。
+   * 普通 cookie 忽略它——除非 options.blockThirdParty 开启（屏蔽第三方 Cookie），
+   * 此时 topUrl 必填且须为有效 http(s) 地址：跨站响应的普通 cookie 拒绝写入/删除
+   * （不改动罐、不触发容量淘汰），Partitioned 分区项仍按既有规则处理。
+   * 返回动作（入罐 / 更新 / 删除 / 拒绝）及原因。
    */
-  store(responseUrl: string, setCookieHeader: string, topUrl?: string, now: number = Date.now()): StoreResult {
+  store(responseUrl: string, setCookieHeader: string, topUrl?: string, options: StoreOptions = {}): StoreResult {
+    const now = options.now ?? Date.now();
     const urlInfo = hostFromUrl(responseUrl);
     if (!urlInfo) {
       return this.result(false, 'rejected', `响应 URL 非法或非 http(s)：${responseUrl}`, []);
@@ -599,6 +628,39 @@ export class CookieJar {
 
     const { host } = urlInfo;
     const notices: string[] = [];
+
+    // ---- 0. 屏蔽第三方 Cookie（可选模式）：跨站响应的普通 cookie 拒绝写入/删除 ----
+    // 判定用既有「站点」规则：scheme + 可注册域（IP、localhost 按完整主机）。
+    // 拒绝直接返回，不触碰罐内容，也不会触发容量淘汰。
+    const blockThirdParty = options.blockThirdParty === true;
+    if (blockThirdParty) {
+      const topRaw = typeof topUrl === 'string' ? topUrl.trim() : '';
+      const topInfo = topRaw === '' ? null : hostFromUrl(topRaw);
+      if (topInfo === null) {
+        return this.result(
+          false,
+          'rejected',
+          '已开启屏蔽第三方 Cookie：必须提供有效的顶层页面 URL（http(s)）作为跨站判定基准' +
+            (topRaw === '' ? '，当前未填写，拒绝入罐' : `，当前值非法或非 http(s)：${topRaw}，拒绝入罐`),
+          notices,
+          parsed,
+        );
+      }
+      const responseSite = siteOf(host, urlInfo.protocol);
+      const topSite = siteOf(topInfo.host, topInfo.protocol);
+      if (responseSite !== topSite && !parsed.partitioned) {
+        const op = parsed.maxAge !== undefined && parsed.maxAge <= 0 ? '删除' : '写入';
+        return this.result(
+          false,
+          'rejected',
+          `已开启屏蔽第三方 Cookie：跨站响应（响应站 ${responseSite} ≠ 顶层站 ${topSite}）` +
+            `拒绝${op}普通 Cookie（罐内容未改动，不触发容量淘汰）；` +
+            `带 Partitioned 的分区 cookie 不受此限，仍按 Secure 与分区键规则处理`,
+          notices,
+          parsed,
+        );
+      }
+    }
 
     // ---- 1. Domain 处理：规范化 + 与响应主机校验 ----
     let domain: string;
@@ -845,14 +907,24 @@ export class CookieJar {
       return this.sendError(`请求 URL 非法或非 http(s)：${requestUrl}`, requestUrl);
     }
 
-    // 顶层页面 URL：缺省视为与请求 URL 相同（同站上下文）
+    const blockThirdParty = options.blockThirdParty === true;
+
+    // 顶层页面 URL：缺省视为与请求 URL 相同（同站上下文）；
+    // 但开启屏蔽第三方 Cookie 时必须显式提供有效的顶层页面 URL 作为跨站判定基准
     const topRaw = typeof options.topUrl === 'string' ? options.topUrl.trim() : '';
+    if (blockThirdParty && topRaw === '') {
+      return this.sendError(
+        '已开启屏蔽第三方 Cookie：必须提供有效的顶层页面 URL（http(s)）作为跨站判定基准，当前未填写',
+        requestUrl,
+        true,
+      );
+    }
     let topInfo = urlInfo;
     let topUrl = requestUrl;
     if (topRaw !== '') {
       const parsedTop = hostFromUrl(topRaw);
       if (!parsedTop) {
-        return this.sendError(`顶层页面 URL 非法或非 http(s)：${topRaw}`, requestUrl);
+        return this.sendError(`顶层页面 URL 非法或非 http(s)：${topRaw}`, requestUrl, blockThirdParty);
       }
       topInfo = parsedTop;
       topUrl = topRaw;
@@ -911,6 +983,16 @@ export class CookieJar {
         excluded.push(base);
         continue;
       }
+      // 屏蔽第三方 Cookie（可选模式）：跨站请求排除普通 cookie；
+      // 分区键匹配的 Partitioned 项豁免，继续走后续既有检查。
+      // 被排除的条目不刷新最近访问时间（只有发送成功才刷新）。
+      if (blockThirdParty && !sameSiteContext && !c.partitioned) {
+        base.detail =
+          `已开启屏蔽第三方 Cookie：跨站请求（${siteCompare}）排除普通 Cookie，不发送；` +
+          `分区键匹配的 Partitioned 项不受此限`;
+        excluded.push(base);
+        continue;
+      }
       if (!domainMatch(host, c)) {
         base.detail = c.hostOnly
           ? `host-only cookie 仅匹配原主机 ${c.domain}，请求主机 ${host} 不相等`
@@ -947,9 +1029,14 @@ export class CookieJar {
       base.verdict = 'send';
       const hostWay = c.hostOnly ? '主机精确相等' : `主机 ${host} 命中域 ${c.domain}`;
       const partitionWay = c.partitioned ? `；分区键 ${partitionKey} 匹配（Partitioned）` : '';
+      const thirdPartyWay =
+        blockThirdParty && !sameSiteContext && c.partitioned
+          ? '；屏蔽第三方 Cookie 已开启：跨站普通 Cookie 被排除，分区键匹配的 Partitioned 项豁免'
+          : '';
       base.detail = `匹配通过：${hostWay}；request-path "${path}" 命中 cookie-path "${c.path}"` +
         (c.secure ? '；https 满足 Secure' : '') +
         partitionWay +
+        thirdPartyWay +
         `；${ssVerdict.note}`;
       // 发送成功即「访问」：刷新最近访问时间（容量淘汰 LRA 依据）
       c.lastAccessedAt = now;
@@ -979,6 +1066,7 @@ export class CookieJar {
       requestSite,
       topSite,
       sameSiteContext,
+      blockThirdParty,
       partitionKey,
       cookieHeader,
       sent,
@@ -1120,7 +1208,7 @@ export class CookieJar {
     };
   }
 
-  private sendError(error: string, requestUrl: string): SendResult {
+  private sendError(error: string, requestUrl: string, blockThirdParty: boolean = false): SendResult {
     return {
       ok: false,
       error,
@@ -1134,6 +1222,7 @@ export class CookieJar {
       requestSite: '',
       topSite: '',
       sameSiteContext: false,
+      blockThirdParty,
       partitionKey: '',
       cookieHeader: '',
       sent: [],

@@ -7,6 +7,7 @@ const els = {
   storeUrl: $('#store-url'),
   storeTopUrl: $('#store-top-url'),
   storeCookie: $('#store-cookie'),
+  storeBlock3p: $('#store-block-3p'),
   storeBtn: $('#store-btn'),
   fillDemo: $('#fill-demo'),
   storeResult: $('#store-result'),
@@ -15,6 +16,7 @@ const els = {
   sendTopUrl: $('#send-top-url'),
   sendMethod: $('#send-method'),
   sendTopnav: $('#send-topnav'),
+  sendBlock3p: $('#send-block-3p'),
   sendBtn: $('#send-btn'),
   sendResult: $('#send-result'),
 
@@ -310,6 +312,9 @@ function renderSendResult(data) {
     ? '<span class="badge ss-same">同站</span>'
     : '<span class="badge ss-cross">跨站</span>';
   const navText = data.topLevelNav ? '顶层导航' : '非顶层导航';
+  const blockBadge = data.blockThirdParty
+    ? '<span class="badge ss-cross">屏蔽第三方 Cookie：开</span>'
+    : '<span class="badge ss-same">屏蔽第三方 Cookie：关</span>';
 
   els.sendResult.innerHTML = `
     <div class="meta-line">
@@ -319,7 +324,7 @@ function renderSendResult(data) {
     </div>
     <div class="meta-line">
       请求站 <code>${escapeHtml(data.requestSite)}</code> vs 顶层站 <code>${escapeHtml(data.topSite)}</code>
-      ${siteBadge} · 方法 <code>${escapeHtml(data.method)}</code> · ${navText}
+      ${siteBadge} · 方法 <code>${escapeHtml(data.method)}</code> · ${navText} · ${blockBadge}
     </div>
     <div class="meta-line">
       🔑 请求分区键（顶层页面 URL 的 scheme + 可注册域）：<code>${escapeHtml(data.partitionKey)}</code>
@@ -355,7 +360,12 @@ els.storeBtn.addEventListener('click', async () => {
   }
   els.storeBtn.disabled = true;
   try {
-    const data = await postJSON('/api/store', { url, setCookie, topUrl });
+    const data = await postJSON('/api/store', {
+      url,
+      setCookie,
+      topUrl,
+      blockThirdParty: els.storeBlock3p.checked,
+    });
     renderStoreResult(data);
   } catch (err) {
     renderStoreResult({
@@ -383,6 +393,7 @@ els.sendBtn.addEventListener('click', async () => {
       topUrl: els.sendTopUrl.value.trim(),
       method: els.sendMethod.value,
       topLevelNav: els.sendTopnav.checked,
+      blockThirdParty: els.sendBlock3p.checked,
     });
     renderSendResult(data);
     // 发送成功的条目刷新了最近访问时间，同步表格与容量用量
