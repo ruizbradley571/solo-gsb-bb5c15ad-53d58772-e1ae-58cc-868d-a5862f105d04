@@ -14,6 +14,12 @@
 可注册域**（IP、localhost 用完整主机）；普通项与不同分区的同名同域同路径项并存，
 发送时只随分区键相同的顶层页面发送，其余分区项在排除明细中说明原因。
 
+另外提供**可选的「屏蔽第三方 Cookie」模式**（默认关闭，写入与发送各自独立开启）：开启时必须
+提供有效顶层页面 URL，按既有 scheme + 可注册域规则判定跨站——**跨站响应**拒绝写入/删除普通
+Cookie（罐内容不变、不触发容量淘汰，Partitioned 仍按既有 Secure 与分区键规则处理）；
+**跨站请求**排除普通 Cookie（不刷新最近访问时间，分区键匹配的 Partitioned 仍可发送），
+拒绝/排除逐项给出策略原因。
+
 技术栈：**TypeScript + Express + 原生 HTML/CSS/JS**（前端无框架、无构建），数据仅存内存；
 same-site 判定使用 [tldts](https://github.com/remusao/tldts)（内置公共后缀列表 PSL，含私有域段）。
 
@@ -63,10 +69,14 @@ docker compose up --build -d    # 改完代码后重新构建并启动
    - 当 Set-Cookie 带 **`Partitioned`**（CHIPS）时，还需填「顶层页面 URL」
      （如嵌入方页面 `https://embed.example.net/`）：分区键取它的 scheme + 可注册域；
      普通 cookie 该栏留空即可
+   - 可勾选 **屏蔽第三方 Cookie**（默认关闭）：跨站响应的普通 Cookie 将被拒绝写入/删除
+     （此时顶层页面 URL 必填；Partitioned 不受影响）
    - 点击 **入罐**，查看入罐 / 更新 / 删除 / 拒绝结果与原因
 2. **发起请求**：填请求 URL（如 `https://api.shop.example.com/orders/123/detail`），
    并可指定 SameSite / 分区判定上下文——**顶层页面 URL**（留空 = 与请求 URL 同站/同分区）、
-   **请求方法**、**是否顶层导航**；点击 **生成 Cookie 头**，查看：
+   **请求方法**、**是否顶层导航**；可再勾选 **屏蔽第三方 Cookie**（默认关闭）：
+   跨站请求不再发送普通 Cookie，仅分区键匹配的 Partitioned 可发（此时顶层页面 URL 必填）。
+   点击 **生成 Cookie 头**，查看：
    - 最终 `Cookie:` 请求头（可一键复制）与本请求的**分区键**
    - 请求站 vs 顶层站（scheme + 可注册域）的同站/跨站结论
    - 📤 **发送项**：命中的主机 / Path / Secure / SameSite / 分区键匹配点
@@ -156,6 +166,16 @@ Partitioned（CHIPS）演算示例（写入时填「顶层页面 URL」，发送
 - IP 顶层页（如 `http://192.168.1.6/`）分区键用完整主机且 scheme 参与：
   换端口仍同分区，换 IP 或换 scheme 即跨分区。
 
+屏蔽第三方 Cookie 演算示例（写入/发送卡片勾选「屏蔽第三方 Cookie」，或 API 传 `"blockThirdParty":true`）：
+
+- 响应 `https://tracker.vendor.com/`、顶层页 `https://shop.example.com/`、普通 Set-Cookie
+  —— **拒绝**：跨站响应不允许写入普通 Cookie，罐内容不变、不触发容量淘汰；
+- 同一响应换成 `t=1; Path=/; Secure; SameSite=None; Partitioned` —— **入罐**
+  （CHIPS 分区项不受第三方拦截限制，分区键 `https://shop.example.com`）；
+- 请求 `https://tracker.vendor.com/`、顶层页 `https://shop.example.com/`、开启模式
+  —— 普通项全部排除（含 `SameSite=None`），仅分区键匹配的 Partitioned 项发送；
+- 开启模式但不填顶层页面 URL —— 写入拒绝 / 发送报错（必须提供有效顶层页面 URL）。
+
 ---
 
 ## 📐 实现的演算规则
@@ -241,6 +261,20 @@ Partitioned（CHIPS）演算示例（写入时填「顶层页面 URL」，发送
 
 排序后以 `; ` 拼接成 `Cookie` 请求头（RFC 6265 的 cookie 排序要求）。
 
+### 屏蔽第三方 Cookie（可选模式，默认关闭）
+
+写入（`/api/store`）与发送（`/api/send`）各自接受 `blockThirdParty`（布尔，默认 `false`），
+界面两张卡片上的开关与之一一对应：
+
+- 开启时**必须提供有效的顶层页面 URL**（http(s)），否则写入直接拒绝、发送直接报错；
+- 跨站判定沿用既有规则：**站点 = scheme + 可注册域**（IP、localhost 按完整主机），
+  顶层站与响应站（写入）/ 请求站（发送）不一致即跨站；
+- **跨站响应**：拒绝写入和删除普通 Cookie——罐内容不变、不触发容量淘汰；
+  `Partitioned`（CHIPS）cookie 不受该策略限制，仍按既有 Secure 与分区键规则正常处理；
+- **跨站请求**：普通（未分区）Cookie 一律排除，且被排除项**不刷新最近访问时间**；
+  分区键匹配的 `Partitioned` 项仍可发送（继续接受 Domain / Path / Secure / SameSite 检查）；
+- 拒绝与排除的结果逐项给出策略原因（写入结果的 `reason`、发送结果逐项的 `detail`）。
+
 ---
 
 ## 🔌 HTTP API
@@ -248,8 +282,8 @@ Partitioned（CHIPS）演算示例（写入时填「顶层页面 URL」，发送
 | 方法 | 路径 | Body（JSON） | 说明 |
 |------|------|--------------|------|
 | GET | `/api/jar` | — | 当前罐快照（`cookies` + `capacity`：容量设置与各可注册域用量） |
-| POST | `/api/store` | `{ "url": "...", "setCookie": "...", "topUrl"?: "..." }` | 顺序写入一条 Set-Cookie；`topUrl` 为顶层页面 URL，仅 `Partitioned` cookie 必需（计算分区键），普通 cookie 可省略。响应含 `eviction`（本次触发的域级/全局淘汰清单与排序依据，无限额时为 `null`） |
-| POST | `/api/send` | `{ "url": "...", "topUrl"?: "...", "method"?: "GET", "topLevelNav"?: true }` | 演算 Cookie 头与逐项原因；请求分区键由顶层页面 URL（缺省取请求 URL）计算并以 `partitionKey` 返回，仅键相同的 `Partitioned` 项发送；发送成功的条目刷新最近访问时间，响应附最新 `cookies` 与 `capacity` |
+| POST | `/api/store` | `{ "url": "...", "setCookie": "...", "topUrl"?: "...", "blockThirdParty"?: false }` | 顺序写入一条 Set-Cookie；`topUrl` 为顶层页面 URL，仅 `Partitioned` cookie 必需（计算分区键），普通 cookie 可省略。`blockThirdParty=true` 开启屏蔽第三方 Cookie（默认 `false`）：此时 `topUrl` 必填，跨站响应拒绝写入/删除普通 Cookie（罐不变、不触发淘汰），Partitioned 照常处理。响应含 `eviction`（本次触发的域级/全局淘汰清单与排序依据，无限额时为 `null`） |
+| POST | `/api/send` | `{ "url": "...", "topUrl"?: "...", "method"?: "GET", "topLevelNav"?: true, "blockThirdParty"?: false }` | 演算 Cookie 头与逐项原因；请求分区键由顶层页面 URL（缺省取请求 URL）计算并以 `partitionKey` 返回，仅键相同的 `Partitioned` 项发送；`blockThirdParty=true` 时 `topUrl` 必填，跨站请求排除普通 Cookie（不刷新最近访问时间），分区键匹配的 Partitioned 仍可发送；发送成功的条目刷新最近访问时间，响应附最新 `cookies` 与 `capacity` |
 | POST | `/api/capacity` | `{ "globalLimit"?: number \| null, "domainLimits"?: { "example.com": 3 } }` | 替换式设置全局 / 每可注册域容量（正整数；`null`/缺省 = 不限），立即执行一轮淘汰并返回报告 |
 | POST | `/api/reset` | — | 清空内存罐（**容量设置保留**） |
 
@@ -280,6 +314,18 @@ curl -s -X POST http://localhost:3000/api/send \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://api.shop.example.com/orders/123",
        "topUrl":"https://other.org/", "method":"GET", "topLevelNav":true}'
+
+# 屏蔽第三方 Cookie：跨站响应的普通 Cookie 被拒绝（开启时 topUrl 必填）
+curl -s -X POST http://localhost:3000/api/store \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://tracker.vendor.com/","setCookie":"t=1; Path=/",
+       "topUrl":"https://shop.example.com/","blockThirdParty":true}'
+
+# 屏蔽第三方 Cookie：跨站请求排除普通 Cookie，仅分区键匹配的 Partitioned 可发
+curl -s -X POST http://localhost:3000/api/send \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://widget.vendor.com/frame",
+       "topUrl":"https://embed.example.net/page","blockThirdParty":true}'
 
 # 设置容量：example.com 域 3 条、全局 10 条（立即按新上限执行一次淘汰）
 curl -s -X POST http://localhost:3000/api/capacity \
@@ -333,7 +379,7 @@ npm run dev
 > Domain / Path / Max-Age / Secure / SameSite / Priority / **Partitioned（CHIPS 分区）**
 > 与容量压力淘汰等规则；
 > 不处理 HttpOnly 发送限制（仅展示标签）、Expires、单条 cookie 字节大小上限等。
-> 分区键与站点一致，取**顶层 URL 的 scheme + 可注册域**（IP、localhost 用完整主机），
-> 不实现浏览器额外的第三方 cookie 策略开关。
+> 分区键与站点一致，取**顶层 URL 的 scheme + 可注册域**（IP、localhost 用完整主机）；
+> 第三方 Cookie 拦截以**可选模式**提供（`blockThirdParty`，默认关闭），规则见上节。
 > 容量按**条目条数**模拟（RFC 6265bis 的每可注册域 180 条、全局 3000 条同型机制），
 > 时间精度取毫秒级，同一毫秒内的次序由创建序号兜底。

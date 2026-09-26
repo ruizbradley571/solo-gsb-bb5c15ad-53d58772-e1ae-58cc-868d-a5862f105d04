@@ -4,9 +4,11 @@
  * 接口：
  *   GET  /                       原生前端页面（public/）
  *   GET  /api/jar                当前内存罐快照（含容量设置与各可注册域用量）
- *   POST /api/store              { url, setCookie, topUrl? } 顺序处理一次 Set-Cookie 写入（含容量压力淘汰）；
- *                                topUrl 为顶层页面 URL，仅 Partitioned cookie 必需（计算分区键）
- *   POST /api/send               { url, topUrl?, method?, topLevelNav? } 演算请求 Cookie 头
+ *   POST /api/store              { url, setCookie, topUrl?, blockThirdParty? } 顺序处理一次 Set-Cookie 写入（含容量压力淘汰）；
+ *                                topUrl 为顶层页面 URL，仅 Partitioned cookie 必需（计算分区键）；
+ *                                blockThirdParty=true 开启屏蔽第三方 Cookie（默认关闭）：跨站响应拒绝写入/删除普通 Cookie
+ *   POST /api/send               { url, topUrl?, method?, topLevelNav?, blockThirdParty? } 演算请求 Cookie 头；
+ *                                blockThirdParty=true 时跨站请求排除普通 Cookie，仅分区键匹配的 Partitioned 可发
  *   POST /api/capacity           { globalLimit?, domainLimits? } 设置全局/每可注册域容量并立即执行淘汰
  *   POST /api/reset              清空内存罐（容量设置保留）
  *
@@ -29,10 +31,11 @@ interface StoreBody {
   url?: unknown;
   setCookie?: unknown;
   topUrl?: unknown;
+  blockThirdParty?: unknown;
 }
 
 app.post('/api/store', (req, res) => {
-  const { url, setCookie, topUrl } = (req.body ?? {}) as StoreBody;
+  const { url, setCookie, topUrl, blockThirdParty } = (req.body ?? {}) as StoreBody;
   if (typeof url !== 'string' || url.trim() === '') {
     res.status(400).json({ ok: false, error: '缺少响应 URL（字段 url）' });
     return;
@@ -45,12 +48,19 @@ app.post('/api/store', (req, res) => {
     res.status(400).json({ ok: false, error: '顶层页面 URL（字段 topUrl）必须是字符串' });
     return;
   }
+  if (blockThirdParty !== undefined && typeof blockThirdParty !== 'boolean') {
+    res.status(400).json({ ok: false, error: '屏蔽第三方 Cookie 开关（字段 blockThirdParty）必须是布尔值' });
+    return;
+  }
   const topUrlTrimmed = typeof topUrl === 'string' ? topUrl.trim() : '';
-  // 仅带 Partitioned 的 Set-Cookie 才使用 topUrl 计算分区键；普通 cookie 忽略它
+  // topUrl 仅用于：Partitioned 计算分区键；blockThirdParty 开启时判定响应是否跨站
   const result = jar.store(
     url.trim(),
     setCookie,
-    topUrlTrimmed === '' ? undefined : topUrlTrimmed,
+    {
+      topUrl: topUrlTrimmed === '' ? undefined : topUrlTrimmed,
+      blockThirdParty: blockThirdParty === true,
+    },
   );
   res.json({ ...result, capacity: jar.capacity() });
 });
@@ -60,10 +70,11 @@ interface SendBody {
   topUrl?: unknown;
   method?: unknown;
   topLevelNav?: unknown;
+  blockThirdParty?: unknown;
 }
 
 app.post('/api/send', (req, res) => {
-  const { url, topUrl, method, topLevelNav } = (req.body ?? {}) as SendBody;
+  const { url, topUrl, method, topLevelNav, blockThirdParty } = (req.body ?? {}) as SendBody;
   if (typeof url !== 'string' || url.trim() === '') {
     res.status(400).json({ ok: false, error: '缺少请求 URL（字段 url）' });
     return;
@@ -80,10 +91,15 @@ app.post('/api/send', (req, res) => {
     res.status(400).json({ ok: false, error: '是否顶层导航（字段 topLevelNav）必须是布尔值' });
     return;
   }
+  if (blockThirdParty !== undefined && typeof blockThirdParty !== 'boolean') {
+    res.status(400).json({ ok: false, error: '屏蔽第三方 Cookie 开关（字段 blockThirdParty）必须是布尔值' });
+    return;
+  }
   const result = jar.send(url.trim(), {
     topUrl: typeof topUrl === 'string' && topUrl.trim() !== '' ? topUrl.trim() : undefined,
     method: typeof method === 'string' && method.trim() !== '' ? method.trim() : undefined,
     topLevelNav,
+    blockThirdParty: blockThirdParty === true,
   });
   // 发送成功的条目会刷新最近访问时间，故把最新罐内容与用量一并返回
   res.json({ ...result, capacity: jar.capacity(), cookies: jar.list() });

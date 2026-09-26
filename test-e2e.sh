@@ -612,6 +612,112 @@ post /api/reset '{}' >/dev/null
 post /api/capacity '{"globalLimit":null,"domainLimits":{}}' >/dev/null
 
 echo
+echo "------- 屏蔽第三方 Cookie（可选模式）写入演算 -------"
+
+echo "== T1. 启用模式但缺顶层页面 URL -> 拒绝 =="
+R=$(post /api/store '{"url":"https://shop.example.com/","setCookie":"t=1; Path=/","blockThirdParty":true}')
+check "拒绝" '"action":"rejected"' "$R"
+check "原因（必须提供顶层页面 URL）" "必须提供顶层页面 URL" "$R"
+
+echo "== T2. 启用模式顶层 URL 非法 -> 拒绝 =="
+R=$(post /api/store '{"url":"https://shop.example.com/","setCookie":"t=1; Path=/","topUrl":"not-a-url","blockThirdParty":true}')
+check "拒绝" '"action":"rejected"' "$R"
+check "原因（URL 非法）" "非法或非 http" "$R"
+
+echo "== T3. 跨站响应拒绝写入普通 Cookie：罐不变、不触发容量淘汰 =="
+post /api/capacity '{"domainLimits":{"example.com":5}}' >/dev/null
+R=$(post /api/store '{"url":"https://shop.example.com/","setCookie":"t=1; Path=/","topUrl":"https://other.org/","blockThirdParty":true}')
+check "拒绝" '"action":"rejected"' "$R"
+check "策略原因（跨站响应）" "跨站响应" "$R"
+check "明示不触发容量淘汰" "不触发容量淘汰" "$R"
+check "eviction 为 null" '"eviction":null' "$R"
+J=$(curl -s "$BASE/api/jar")
+check "罐仍为空" '"cookies":[]' "$J"
+post /api/capacity '{"globalLimit":null,"domainLimits":{}}' >/dev/null
+
+echo "== T4. 跨站响应拒绝删除普通 Cookie（已有项保留） =="
+post /api/store '{"url":"https://shop.example.com/","setCookie":"keep=1; Path=/"}' >/dev/null
+R=$(post /api/store '{"url":"https://shop.example.com/","setCookie":"keep=; Path=/; Max-Age=0","topUrl":"https://other.org/","blockThirdParty":true}')
+check "拒绝删除" '"action":"rejected"' "$R"
+check "策略原因（写入或删除）" "写入或删除普通 Cookie" "$R"
+J=$(curl -s "$BASE/api/jar")
+check "原项保留" '"name":"keep"' "$J"
+
+echo "== T5. 跨站响应中的 Partitioned 仍按既有规则入罐 =="
+R=$(post /api/store '{"url":"https://widget.vendor.com/","setCookie":"ch=1; Path=/; Secure; SameSite=None; Partitioned","topUrl":"https://other.org/","blockThirdParty":true}')
+check "入罐" '"action":"stored"' "$R"
+check "提示不受策略限制" "不受该策略限制" "$R"
+check "分区键取自顶层页" '"partitionKey":"https://other.org"' "$R"
+
+echo "== T6. 同站响应（启用模式）普通 Cookie 照常入罐 =="
+R=$(post /api/store '{"url":"https://shop.example.com/","setCookie":"same=1; Path=/","topUrl":"https://example.com/","blockThirdParty":true}')
+check "入罐" '"action":"stored"' "$R"
+check "同站不拦截提示" "同站" "$R"
+
+echo "== T7. 默认关闭：不传开关时跨站普通 Cookie 不受影响 =="
+R=$(post /api/store '{"url":"https://shop.example.com/","setCookie":"off=1; Path=/","topUrl":"https://other.org/"}')
+check "入罐" '"action":"stored"' "$R"
+
+post /api/reset '{}' >/dev/null
+
+echo
+echo "------- 屏蔽第三方 Cookie（可选模式）发送演算 -------"
+
+# 准备：普通 Lax 项、普通 SameSite=None 项、分区键 https://other.org 的 Partitioned 项
+post /api/store '{"url":"https://shop.example.com/","setCookie":"n_lax=1; Path=/"}' >/dev/null
+post /api/store '{"url":"https://shop.example.com/","setCookie":"n_none=1; Path=/; Secure; SameSite=None"}' >/dev/null
+post /api/store '{"url":"https://shop.example.com/","setCookie":"n_part=1; Path=/; Secure; SameSite=None; Partitioned","topUrl":"https://other.org/"}' >/dev/null
+
+echo "== T8. 启用模式但缺顶层页面 URL -> 报错 =="
+R=$(post /api/send '{"url":"https://shop.example.com/","blockThirdParty":true}')
+check "报错" "必须提供有效的顶层页面 URL" "$R"
+
+echo "== T9. 跨站请求：普通项全部排除（含 SameSite=None），分区键匹配的 Partitioned 发送 =="
+R=$(post /api/send '{"url":"https://shop.example.com/","topUrl":"https://other.org/","blockThirdParty":true}')
+HDR=$(echo "$R" | python3 -c "import sys,json;print(json.load(sys.stdin)['cookieHeader'])")
+check "回显模式开启" '"blockThirdParty":true' "$R"
+check "跨站标记" '"sameSiteContext":false' "$R"
+check "Partitioned 项发送" "n_part=1" "$HDR"
+if [[ "$HDR" != *"n_lax=1"* ]] && [[ "$HDR" != *"n_none=1"* ]]; then echo "✅ 普通项（含 SameSite=None）跨站全排除"; PASS=$((PASS+1));
+else echo "❌ 普通项被误发（$HDR）"; FAIL=$((FAIL+1)); fi
+check "排除原因（屏蔽第三方 Cookie）" "屏蔽第三方 Cookie：跨站请求" "$R"
+N_EXCL=$(echo "$R" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+print(sum(1 for i in d['excluded'] if '屏蔽第三方 Cookie' in i['detail']))")
+[ "$N_EXCL" = "2" ] && { echo "✅ 2 个普通项均以第三方策略排除"; PASS=$((PASS+1)); } || { echo "❌ 第三方排除条数错误: $N_EXCL"; FAIL=$((FAIL+1)); }
+
+echo "== T10. 跨站 + 分区键不符：Partitioned 项同样排除（分区规则优先） =="
+R=$(post /api/send '{"url":"https://shop.example.com/","topUrl":"https://third.net/","blockThirdParty":true}')
+HDR=$(echo "$R" | python3 -c "import sys,json;print(json.load(sys.stdin)['cookieHeader'])")
+if [[ "$HDR" != *"n_part=1"* ]]; then echo "✅ 分区键不符的 Partitioned 不发送"; PASS=$((PASS+1));
+else echo "❌ 分区键不符仍误发"; FAIL=$((FAIL+1)); fi
+check "分区排除原因" "≠ 请求分区键" "$R"
+
+echo "== T11. 同站请求（启用模式）普通项照常发送 =="
+R=$(post /api/send '{"url":"https://shop.example.com/","topUrl":"https://example.com/","blockThirdParty":true}')
+HDR=$(echo "$R" | python3 -c "import sys,json;print(json.load(sys.stdin)['cookieHeader'])")
+check "同站标记" '"sameSiteContext":true' "$R"
+check "普通 Lax 项发送" "n_lax=1" "$HDR"
+check "普通 None 项发送" "n_none=1" "$HDR"
+
+echo "== T12. 被排除的普通项不刷新最近访问时间 =="
+post /api/reset '{}' >/dev/null
+post /api/store '{"url":"https://lra3p.test/","setCookie":"acc=1; Path=/"}' >/dev/null
+T0=$(curl -s "$BASE/api/jar" | python3 -c "import sys,json;print(json.load(sys.stdin)['cookies'][0]['lastAccessedAt'])")
+sleep 1.2
+# 跨站 + 屏蔽模式：acc 被排除，不应刷新访问时间
+post /api/send '{"url":"https://lra3p.test/","topUrl":"https://other.org/","blockThirdParty":true}' >/dev/null
+T1=$(curl -s "$BASE/api/jar" | python3 -c "import sys,json;print(json.load(sys.stdin)['cookies'][0]['lastAccessedAt'])")
+[ "$T0" = "$T1" ] && { echo "✅ 排除项最近访问时间未变（$T1）"; PASS=$((PASS+1)); } || { echo "❌ 排除项访问时间被刷新: $T0 -> $T1"; FAIL=$((FAIL+1)); }
+# 对照：同站发送成功后应刷新
+post /api/send '{"url":"https://lra3p.test/"}' >/dev/null
+T2=$(curl -s "$BASE/api/jar" | python3 -c "import sys,json;print(json.load(sys.stdin)['cookies'][0]['lastAccessedAt'])")
+[ "$T2" != "$T0" ] && { echo "✅ 发送成功项刷新最近访问时间（$T2）"; PASS=$((PASS+1)); } || { echo "❌ 发送成功项访问时间未刷新"; FAIL=$((FAIL+1)); }
+
+post /api/reset '{}' >/dev/null
+
+echo
 echo "================================"
 echo "通过 $PASS，失败 $FAIL"
 [ "$FAIL" -eq 0 ]

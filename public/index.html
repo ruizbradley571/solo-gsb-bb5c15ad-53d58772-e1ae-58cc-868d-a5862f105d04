@@ -39,6 +39,11 @@
             placeholder="例如：https://embed.example.net/（Partitioned cookie 嵌入第三方页面时的顶层页）" />
         </label>
 
+        <label class="field field-nav">
+          <input id="store-block-3p" type="checkbox" />
+          <span>屏蔽第三方 Cookie（可选，默认关闭）：跨站响应拒绝写入/删除普通 Cookie，Partitioned 仍按既有规则处理；开启时上方顶层页面 URL 必填</span>
+        </label>
+
         <div class="row">
           <button id="store-btn" class="btn primary">入罐</button>
           <button id="fill-demo" class="btn ghost" type="button">填入示例</button>
@@ -80,6 +85,11 @@
             <span>顶层导航（地址栏 / 链接跳转；子资源、iframe、fetch 请取消勾选）</span>
           </label>
         </div>
+
+        <label class="field field-nav">
+          <input id="send-block-3p" type="checkbox" />
+          <span>屏蔽第三方 Cookie（可选，默认关闭）：跨站请求不发送普通 Cookie，仅分区键匹配的 Partitioned 可发；开启时上方顶层页面 URL 必填</span>
+        </label>
 
         <div class="row">
           <button id="send-btn" class="btn primary">生成 Cookie 头</button>
@@ -146,6 +156,7 @@
         <li><strong>容量压力：</strong>可分别为每个<strong>可注册域</strong>（eTLD+1；IP / localhost 按完整主机）与<strong>全局</strong>设置条目数上限。入罐通过全部校验后，<strong>先执行域级淘汰、再执行全局淘汰</strong>；仅在范围内条数超限时动作：<strong>先清理过期项</strong>，仍超限再按 <strong>Priority 低→高、最近访问时间早→晚、创建序号小→大</strong> 依次淘汰，直到回到上限。修改容量设置会立即执行一次。</li>
         <li><strong>最近访问（LRA）：</strong>创建 / 覆盖更新时写入访问时间；条目<strong>发送成功</strong>即刷新。同级 Priority 中越久未访问越先被淘汰。</li>
         <li><strong>站点（site）：</strong>scheme + 可注册域（eTLD+1，由公共后缀列表 PSL 判定，如 <code>https://example.com</code>）；IP 与 localhost 按完整主机比较。请求站 = 顶层站即「同站」。</li>
+        <li><strong>屏蔽第三方 Cookie（可选模式，默认关闭）：</strong>写入与发送卡片各有独立开关（对应 API 的 <code>blockThirdParty</code>）。开启时<strong>顶层页面 URL 必填</strong>且须为有效 http(s) 地址，按 scheme + 可注册域判定跨站：<strong>跨站响应</strong>拒绝写入/删除普通 Cookie（罐不变、不触发容量淘汰），Partitioned 仍按既有 Secure 与分区键规则处理；<strong>跨站请求</strong>排除普通 Cookie（不刷新最近访问时间），分区键匹配的 Partitioned 仍可发送。拒绝/排除逐项给出策略原因。</li>
         <li><strong>发送限制：</strong><code>Strict</code> 仅同站发送；显式 <code>Lax</code> 仅同站或跨站顶层导航的安全方法（GET/HEAD/OPTIONS/TRACE）发送；<strong>默认 Lax</strong> 额外允许创建不超过 <strong>120 秒</strong>的跨站顶层 POST；<code>None</code> 跨站照常发送（已强制 Secure）。</li>
         <li><strong>排序：</strong>发送时按 Path 长度降序，Path 等长时按首次创建顺序升序，再以 <code>; </code> 拼接成 Cookie 头。</li>
       </ul>
